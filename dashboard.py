@@ -1,3 +1,4 @@
+import os
 import psycopg2
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -5,22 +6,61 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 import asyncio
 import time
+import random
+from datetime import datetime
 
 app = FastAPI()
 
 def conectar_banco():
+    url_banco = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@db:5432/telemetria")
     while True:
         try:
-            conexao = psycopg2.connect(
-                dbname="telemetria",
-                user="admin",
-                password="adminpassword",
-                host="db",
-                port="5432"
-            )
+            conexao = psycopg2.connect(url_banco)
             return conexao
         except psycopg2.OperationalError:
             time.sleep(2)
+
+async def motor_gerador_background():
+    conexao = conectar_banco()
+    cursor = conexao.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS metricas_hardware (
+            id SERIAL PRIMARY KEY,
+            timestamp TIMESTAMP,
+            cpu_usage_pct REAL,
+            gpu_usage_pct REAL,
+            ram_usage_gb REAL,
+            cpu_temp_celsius REAL,
+            thermal_throttling INTEGER,
+            gargalo_cpu INTEGER
+        )
+    """)
+    conexao.commit()
+
+    while True:
+        try:
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            cpu = round(random.uniform(10.0, 99.9), 2)
+            gpu = round(random.uniform(5.0, 100.0), 2)
+            ram = round(random.uniform(4.0, 32.0), 2)
+            temp = round(random.uniform(40.0, 95.0), 2)
+            termico = 1 if temp > 85.0 else 0
+            gargalo = 1 if cpu > 90.0 and gpu < 50.0 else 0
+
+            cursor.execute("""
+                INSERT INTO metricas_hardware 
+                (timestamp, cpu_usage_pct, gpu_usage_pct, ram_usage_gb, cpu_temp_celsius, thermal_throttling, gargalo_cpu)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (timestamp, cpu, gpu, ram, temp, termico, gargalo))
+            
+            conexao.commit()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+@app.on_event("startup")
+async def iniciar_motor():
+    asyncio.create_task(motor_gerador_background())
 
 def obter_dados_dashboard():
     conexao = conectar_banco()
@@ -37,8 +77,9 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             try:
                 df = obter_dados_dashboard()
-                data = df.to_dict(orient="records")
-                await websocket.send_json(data)
+                if not df.empty:
+                    data = df.to_dict(orient="records")
+                    await websocket.send_json(data)
             except Exception:
                 pass
             await asyncio.sleep(2)
