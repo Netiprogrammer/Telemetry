@@ -208,7 +208,7 @@ def renderizar_dashboard():
             inicializarGraficos();
 
             const protocolo = window.location.protocol === "https:" ? "wss://" : "ws://";
-            const ws = new WebSocket(protocol + window.location.host + "/ws");
+            const ws = new WebSocket(protocolo + window.location.host + "/ws");
 
             ws.onmessage = function(event) {
                 let dados = JSON.parse(event.data);
