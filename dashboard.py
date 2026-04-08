@@ -3,13 +3,21 @@ import psycopg2
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 import uvicorn
 import asyncio
 import time
-import random
-from datetime import datetime
 
 app = FastAPI()
+
+# Criando a estrutura de segurança (Schema) para receber os dados
+class MetricaHardware(BaseModel):
+    cpu_usage_pct: float
+    gpu_usage_pct: float
+    ram_usage_gb: float
+    cpu_temp_celsius: float
+    thermal_throttling: int
+    gargalo_cpu: int
 
 def conectar_banco():
     url_banco = os.getenv("DATABASE_URL", "postgresql://admin:adminpassword@db:5432/telemetria")
@@ -20,13 +28,14 @@ def conectar_banco():
         except psycopg2.OperationalError:
             time.sleep(2)
 
-async def motor_gerador_background():
+@app.on_event("startup")
+def criar_tabela():
     conexao = conectar_banco()
     cursor = conexao.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS metricas_hardware (
             id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             cpu_usage_pct REAL,
             gpu_usage_pct REAL,
             ram_usage_gb REAL,
@@ -36,31 +45,25 @@ async def motor_gerador_background():
         )
     """)
     conexao.commit()
+    conexao.close()
 
-    while True:
-        try:
-            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            cpu = round(random.uniform(10.0, 99.9), 2)
-            gpu = round(random.uniform(5.0, 100.0), 2)
-            ram = round(random.uniform(4.0, 32.0), 2)
-            temp = round(random.uniform(40.0, 95.0), 2)
-            termico = 1 if temp > 85.0 else 0
-            gargalo = 1 if cpu > 90.0 and gpu < 50.0 else 0
-
-            cursor.execute("""
-                INSERT INTO metricas_hardware 
-                (timestamp, cpu_usage_pct, gpu_usage_pct, ram_usage_gb, cpu_temp_celsius, thermal_throttling, gargalo_cpu)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (timestamp, cpu, gpu, ram, temp, termico, gargalo))
-            
-            conexao.commit()
-        except Exception:
-            pass
-        await asyncio.sleep(2)
-
-@app.on_event("startup")
-async def iniciar_motor():
-    asyncio.create_task(motor_gerador_background())
+# ROTA NOVA: É aqui que o seu notebook vai "bater" para entregar os dados
+@app.post("/api/enviar-telemetria")
+def receber_dados(metrica: MetricaHardware):
+    try:
+        conexao = conectar_banco()
+        cursor = conexao.cursor()
+        cursor.execute("""
+            INSERT INTO metricas_hardware 
+            (cpu_usage_pct, gpu_usage_pct, ram_usage_gb, cpu_temp_celsius, thermal_throttling, gargalo_cpu)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (metrica.cpu_usage_pct, metrica.gpu_usage_pct, metrica.ram_usage_gb, 
+              metrica.cpu_temp_celsius, metrica.thermal_throttling, metrica.gargalo_cpu))
+        conexao.commit()
+        conexao.close()
+        return {"status": "sucesso", "mensagem": "Dado inserido no banco"}
+    except Exception as e:
+        return {"status": "erro", "mensagem": str(e)}
 
 def obter_dados_dashboard():
     conexao = conectar_banco()
@@ -80,7 +83,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not df.empty:
                     data = df.to_dict(orient="records")
                     await websocket.send_json(data)
-            except Exception:
+            except Exception as e:
+                print(f"ERRO NO WEBSOCKET: {e}")
                 pass
             await asyncio.sleep(2)
     except WebSocketDisconnect:
@@ -127,11 +131,11 @@ def renderizar_dashboard():
                 <div class="kpi-value" id="kpi-cpu">--%</div>
             </div>
             <div class="kpi-card">
-                <div class="kpi-title">Temperatura Atual</div>
-                <div class="kpi-value" id="kpi-temp">--°C</div>
+                <div class="kpi-title">Memória RAM</div>
+                <div class="kpi-value" id="kpi-temp">-- GB</div>
             </div>
             <div class="kpi-card">
-                <div class="kpi-title">Status Térmico</div>
+                <div class="kpi-title">Status da Máquina</div>
                 <div class="kpi-value" id="kpi-status-termico">--</div>
             </div>
             <div class="kpi-card">
@@ -146,7 +150,7 @@ def renderizar_dashboard():
                 <canvas id="chartCpuGpu"></canvas>
             </div>
             <div class="chart-box">
-                <div class="chart-title">Evolução Térmica (°C)</div>
+                <div class="chart-title">Uso de Memória RAM (GB)</div>
                 <canvas id="chartTemp"></canvas>
             </div>
         </div>
@@ -173,10 +177,10 @@ def renderizar_dashboard():
                 graficoTemp = new Chart(ctxTemp, {
                     type: 'line',
                     data: { labels: [], datasets: [
-                        { label: 'Temperatura (°C)', borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderWidth: 2, pointRadius: 0, tension: 0.3, data: [], fill: true }
+                        { label: 'RAM (GB)', borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', borderWidth: 2, pointRadius: 0, tension: 0.3, data: [], fill: true }
                     ]},
                     options: { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { 
-                        y: { min: 30, max: 100, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
+                        y: { min: 0, max: 32, grid: { color: '#334155' }, ticks: { color: '#94a3b8' } },
                         x: { grid: { display: false }, ticks: { color: '#94a3b8', maxTicksLimit: 10 } }
                     }, plugins: { legend: { labels: { color: '#cbd5e1' } } } }
                 });
@@ -184,11 +188,11 @@ def renderizar_dashboard():
 
             function atualizarKPIs(dadoRecente) {
                 document.getElementById('kpi-cpu').textContent = dadoRecente.cpu_usage_pct + '%';
-                document.getElementById('kpi-temp').textContent = dadoRecente.cpu_temp_celsius + '°C';
+                document.getElementById('kpi-temp').textContent = dadoRecente.ram_usage_gb + ' GB';
 
                 const elTermico = document.getElementById('kpi-status-termico');
-                if (dadoRecente.thermal_throttling === 1) {
-                    elTermico.textContent = 'ALERTA';
+                if (dadoRecente.cpu_usage_pct > 85) {
+                    elTermico.textContent = 'ESTRESSADA';
                     elTermico.className = 'kpi-value kpi-alert';
                 } else {
                     elTermico.textContent = 'ESTÁVEL';
@@ -220,7 +224,7 @@ def renderizar_dashboard():
                     const labels = dados.map(d => d.timestamp.split(' ')[1]);
                     const cpuData = dados.map(d => d.cpu_usage_pct);
                     const gpuData = dados.map(d => d.gpu_usage_pct);
-                    const tempData = dados.map(d => d.cpu_temp_celsius);
+                    const ramData = dados.map(d => d.ram_usage_gb);
 
                     graficoCpuGpu.data.labels = labels;
                     graficoCpuGpu.data.datasets[0].data = cpuData;
@@ -228,7 +232,7 @@ def renderizar_dashboard():
                     graficoCpuGpu.update();
 
                     graficoTemp.data.labels = labels;
-                    graficoTemp.data.datasets[0].data = tempData;
+                    graficoTemp.data.datasets[0].data = ramData;
                     graficoTemp.update();
                 }
             };
