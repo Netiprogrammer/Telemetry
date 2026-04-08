@@ -51,20 +51,23 @@ def criar_tabela():
 @app.post("/api/enviar-telemetria")
 def receber_dados(metrica: MetricaHardware):
     try:
+        from datetime import datetime
+        timestamp_agora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
         conexao = conectar_banco()
         cursor = conexao.cursor()
         cursor.execute("""
             INSERT INTO metricas_hardware 
-            (cpu_usage_pct, gpu_usage_pct, ram_usage_gb, cpu_temp_celsius, thermal_throttling, gargalo_cpu)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (metrica.cpu_usage_pct, metrica.gpu_usage_pct, metrica.ram_usage_gb, 
+            (timestamp, cpu_usage_pct, gpu_usage_pct, ram_usage_gb, cpu_temp_celsius, thermal_throttling, gargalo_cpu)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (timestamp_agora, metrica.cpu_usage_pct, metrica.gpu_usage_pct, metrica.ram_usage_gb, 
               metrica.cpu_temp_celsius, metrica.thermal_throttling, metrica.gargalo_cpu))
         conexao.commit()
         conexao.close()
         return {"status": "sucesso", "mensagem": "Dado inserido no banco"}
     except Exception as e:
         return {"status": "erro", "mensagem": str(e)}
-
+    
 def obter_dados_dashboard():
     conexao = conectar_banco()
     query = "SELECT * FROM metricas_hardware ORDER BY timestamp DESC LIMIT 30"
